@@ -50,10 +50,20 @@ def boom(chunk):
 
 class TestPartitioning(NtupleTestCase):
     def test_one_partition_per_file_by_default(self):
+        """A whole-file partition leaves `stop` open so the file need not be opened."""
         parts = build_partitions(Dataset(self.path), None)
         self.assertEqual(len(parts), 1)
         self.assertEqual(parts[0].start, 0)
-        self.assertEqual(parts[0].stop, 100)
+        self.assertIsNone(parts[0].stop)
+
+    def test_default_partitioning_opens_no_files(self):
+        """Opening files to partition means schema discovery for each, serially, in the
+        parent -- ~0.4 s per EventNtuple, which at 60 files cost more than the parallel
+        read that followed. The worker opens its own file anyway."""
+        dataset = Dataset(self.path)
+        build_partitions(dataset, None)
+        self.assertEqual(dataset._readers, {},
+                         "partitioning opened files in the parent process")
 
     def test_large_file_is_split(self):
         """A dataset that is really one big file must still parallelize."""
@@ -64,10 +74,13 @@ class TestPartitioning(NtupleTestCase):
         self.assertEqual(sum(p.num_entries for p in parts), 100)
 
     def test_partitions_cover_every_entry_exactly_once(self):
-        for max_entries in (None, 7, 30, 1000):
+        for max_entries in (7, 30, 1000):
             parts = build_partitions(Dataset(self.path), max_entries)
             covered = [i for p in parts for i in range(p.start, p.stop)]
             self.assertEqual(covered, list(range(100)), f"max_entries={max_entries}")
+        # the default whole-file partition covers everything by construction
+        parts = build_partitions(Dataset(self.path), None)
+        self.assertEqual([(p.start, p.stop) for p in parts], [(0, None)])
 
 
 class TestMap(NtupleTestCase):

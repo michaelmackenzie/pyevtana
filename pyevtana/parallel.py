@@ -32,16 +32,21 @@ ON_ERROR = ("raise", "skip", "collect")
 
 @dataclass(frozen=True)
 class Partition:
-    """A contiguous entry range of one file."""
+    """A contiguous entry range of one file.
+
+    ``stop=None`` means "to the end of the file" and is the normal case: it lets the
+    partitioner avoid opening the file at all, leaving that to the worker that will read
+    it anyway.
+    """
 
     path: str
     start: int
-    stop: int
+    stop: Optional[int] = None
     index: int = 0
 
     @property
-    def num_entries(self) -> int:
-        return self.stop - self.start
+    def num_entries(self) -> Optional[int]:
+        return None if self.stop is None else self.stop - self.start
 
     def __repr__(self) -> str:
         return f"<Partition {os.path.basename(self.path)}[{self.start}:{self.stop}]>"
@@ -108,14 +113,15 @@ class Chunk:
 
     @property
     def num_entries(self) -> int:
-        return self.partition.num_entries
+        n = self.partition.num_entries
+        return n if n is not None else self.reader.num_entries
 
     @property
     def schema(self):
         return self.reader.schema
 
     def __len__(self) -> int:
-        return self.partition.num_entries
+        return self.num_entries
 
     def __repr__(self) -> str:
         return f"<Chunk {self.partition}>"
@@ -132,6 +138,15 @@ def plan_partitions(dataset, max_entries: Optional[int] = None,
     """
     partitions: list[Partition] = []
     failures: list[PartitionError] = []
+
+    if not max_entries or max_entries <= 0:
+        # One partition per file, covering the whole file. Deliberately does NOT open the
+        # files: opening them here means schema discovery for every file, serially, in the
+        # parent -- ~0.4 s each on an EventNtuple, which at 60 files was longer than the
+        # entire parallel read that followed. The worker opens its own file anyway.
+        return ([Partition(path, 0, None, i) for i, path in enumerate(dataset.paths)],
+                failures)
+
     for path in dataset.paths:
         try:
             total = dataset.reader(path).num_entries
@@ -141,7 +156,7 @@ def plan_partitions(dataset, max_entries: Optional[int] = None,
             failures.append(PartitionError(Partition(path, 0, 0, len(partitions)),
                                            traceback.format_exc()))
             continue
-        if max_entries is None or max_entries <= 0 or total <= max_entries:
+        if total <= max_entries:
             partitions.append(Partition(path, 0, total, len(partitions)))
         else:
             for start in range(0, total, max_entries):

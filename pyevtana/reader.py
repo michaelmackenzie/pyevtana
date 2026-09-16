@@ -265,13 +265,37 @@ class FileReader:
                 f"branches= filter; required= and branches= disagree"
             )
 
+    def selected_leaves(self) -> list:
+        """Every leaf this reader may actually read, for sizing batches."""
+        names: list = []
+        for info in self.schema.collections.values():
+            if info.state is not BranchState.LOADED:
+                continue
+            names.extend(info.selected if info.split else [info.branch])
+        return names
+
     def entries_per_batch(self, step_size) -> int:
+        """Entries per batch, sized from the branches actually being read.
+
+        ``num_entries_for`` defaults to the whole tree, which badly undersizes batches
+        whenever a filter is in play: on an EventNtuple where 71 MB of 449 MB is selected,
+        a "100 MB" step came out as 1830 entries instead of 11653, so a file was read in
+        five batches rather than one. Each extra batch means another read call per branch,
+        and those small scattered reads cost far more under concurrency than one large
+        sequential one.
+        """
         if isinstance(step_size, int):
             return max(1, step_size)
         try:
+            names = self.selected_leaves()
+            if names:
+                return max(1, int(self.tree.num_entries_for(step_size, expressions=names)))
             return max(1, int(self.tree.num_entries_for(step_size)))
         except Exception:
-            return 10000
+            try:
+                return max(1, int(self.tree.num_entries_for(step_size)))
+            except Exception:
+                return 10000
 
     def batches(self, step_size, start: int = 0, stop: Optional[int] = None) -> Iterator[Batch]:
         stop = self.num_entries if stop is None else min(stop, self.num_entries)

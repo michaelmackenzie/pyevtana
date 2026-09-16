@@ -18,6 +18,8 @@ sys.path.insert(0, PYFITTER)
 import common
 
 #: the selection pyfitter applies by default (process.py), all cuts through within_t0_475
+#: pyfitter's 22 named switches, in its own order (process.py). `st_boundary` is not a
+#: named switch -- it reuses has_st's -- but it does appear in the resulting cut flow.
 CUT_NAMES = [
     "has_a_track", "is_good_track", "has_trk_front_seg", "is_reco_electron_or_positron",
     "has_downstream", "charge_selection", "or_trigger", "upstream_veto",
