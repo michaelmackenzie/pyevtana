@@ -260,6 +260,57 @@ physics. Where the time goes now:
 | per-field `to_list` | 14% |
 | Python object loop | 41% |
 
+### pyfitter vs pyevtana, same selection
+
+![framework comparison](benchmarks/frameworks.png)
+
+The object loop and pyfitter run the **identical** 20-cut selection -- every stage of the
+per-event cut flow agrees exactly, checked by `validate_against_pyfitter.py` -- and read the
+identical branch list.
+
+| workers | 1 | 5 | 10 | 15 | 20 |
+|---|---|---|---|---|---|
+| pyfitter / pyutils | 1915 | 7982 | 12979 | 17896 | 18818 |
+| pyevtana object loop | 2069 | 9227 | 18201 | 26181 | **34443** |
+| pyevtana read-only (floor) | 3397 | 15869 | 30619 | 44124 | **55602** |
+
+Parallel efficiency at 20 workers: pyfitter 49%, pyevtana 83%. The two are within 8% of each
+other on one worker; the gap at scale is scaling, not per-event speed.
+
+```bash
+bash benchmarks/run_scaling.sh results.jsonl 3 "1 5 10 15 20"
+python3 benchmarks/plot_frameworks.py results.jsonl
+```
+
+### Parallel scaling
+
+![parallel scaling](benchmarks/scaling.png)
+
+Read-only throughput, 3 files (~24,950 events) per worker on a 48-core host, warm cache.
+Two bugs were flattening it, both found by the middle panel: **CPU-seconds per wall second**
+says how many workers are actually working, and it sat at 6.7 of 20.
+
+- **The partitioner opened every file in the parent process.** Working out where partitions
+  begin meant reading each file's entry count, and that runs schema discovery -- ~0.4 s per
+  EventNtuple, serially, before any worker starts. At 60 files that prologue was longer than
+  the parallel read that followed, and because a weak-scaling study grows the file count with
+  the worker count, the serial fraction grew too. A whole-file partition now carries
+  `stop=None` and opens nothing; the worker opens the file it was going to open anyway.
+- **Batches were sized from the whole tree.** `num_entries_for("100 MB")` defaulted to every
+  branch (449 MB) rather than the selected ones (71 MB), so a file was read in five batches
+  instead of one.
+
+Together: **2,022 -> 51,658 events/s at 20 workers (25x)**, utilisation 6.7 -> 17.8 of 20,
+aggregate read bandwidth 139 -> 438 MB/s. The third panel compares that against
+pyfitter/pyutils on the same files and branch list -- bandwidth is the fair axis there, since
+pyfitter runs its full selection rather than reading only.
+
+Regenerate the figure from the recorded numbers (it never re-runs a benchmark):
+
+```bash
+python3 benchmarks/plot_scaling.py
+```
+
 ### What was slow, and what fixed it
 
 **Awkward scalar access, ~58 us per field read.** `arr[i]` costs ~41 us and

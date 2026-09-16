@@ -1,0 +1,48 @@
+{
+  "_source": "Measured on CeMLeadingLogMix1BB, 3 files (~24950 events) per worker, warm page cache, 48-core host. pyevtana rows are read-and-normalize only (bench_handler.py); the pyfitter row runs its full selection (bench_pyfitter.py) and is shown for bandwidth comparison only, since it reads the same bytes.",
+  "files_per_worker": 3,
+  "mb_per_file": 70.16,
+  "events": {"1": 24950, "5": 124295, "10": 248330, "20": 496868},
+  "series": {
+    "before fixes": {
+      "note": "as first written: batches sized from the whole tree, partitioner opened every file",
+      "handler": "memmap",
+      "workers": [1, 5, 10, 20],
+      "wall":    [12.3, 16.6, 23.3, 34.6],
+      "cpu_over_wall": [0.99, 3.77, 5.68, 7.90],
+      "events_per_s": [2022, 7487, 10635, 14359]
+    },
+    "after batch-size fix": {
+      "note": "batches sized from the selected branches only",
+      "handler": "memmap",
+      "workers": [1, 5, 10, 20],
+      "wall":    [8.3, 13.1, 18.5, 30.5],
+      "cpu_over_wall": [0.99, 3.36, 4.96, 6.72],
+      "events_per_s": [3014, 9524, 13397, 16315]
+    },
+    "after partitioning fix": {
+      "note": "partitioner no longer opens every file in the parent process",
+      "handler": "memmap",
+      "workers": [1, 5, 10, 20],
+      "wall":    [7.1, 8.0, 8.8, 9.6],
+      "cpu_over_wall": [0.99, 4.82, 9.37, 17.80],
+      "events_per_s": [3518, 15614, 28179, 51658]
+    },
+    "uproot default handler": {
+      "note": "final code, uproot's own source instead of MemmapSource",
+      "handler": "uproot-default",
+      "workers": [1, 5, 10, 20],
+      "wall":    [14.7, 15.3, 16.5, 18.4],
+      "cpu_over_wall": [0.66, 3.38, 6.61, 12.34],
+      "events_per_s": [1692, 8148, 15024, 26979]
+    },
+    "pyfitter / pyutils": {
+      "note": "full selection, not read-only; same files and branch list",
+      "handler": "uproot-default",
+      "workers": [10, 20],
+      "wall":    [17.70, 22.51],
+      "cpu_over_wall": [7.21, 11.90],
+      "events_per_s": [14033.8, 22077.6]
+    }
+  }
+}
