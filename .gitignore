@@ -1,0 +1,30 @@
+*~
+*pycache*
+#*
+.#*
+*\#
+#ignore images by default
+*.png
+*.jpg
+*.svg
+*.pdf
+*.gif
+*.pyc
+*.so
+*.d
+*.pcm
+*.zip
+#Ignore data files
+*.root
+*.hist
+*.tree
+*/datacards
+notes.org
+#Ignore temporary files
+*.txt
+*.log
+*.out
+*.tmp
+*.save
+*.diff
+*.swap
