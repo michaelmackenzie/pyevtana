@@ -7,7 +7,7 @@
 
 ## Status (2026-09-16)
 
-**Built and tested: all phases. 95 tests pass** (`PYTHONPATH=.:tests python3 -m unittest
+**Built and tested: all phases. 107 tests pass** (`PYTHONPATH=.:tests python3 -m unittest
 discover -s tests -t tests`), stdlib `unittest` because the `rootana 2.5.0` environment has
 no pytest. See [README.md](README.md) for usage.
 
@@ -37,6 +37,29 @@ with no branch claimed twice, prefix-ambiguous tags (`de` vs `dem`), multiple Tr
 leaves, `mcsteps_*` and `crvcoincsmcplane_*`, and deliberate schema mismatches. What remains
 unproven is the end-to-end read of a real `EventNtupleTimeClusterInfo` / `LineSeedInfo`
 branch — worth one run against a Run1B ntuple before relying on it.
+
+**Maintenance burden vs. the C++ headers.** Struct *fields* are never enumerated — they
+come from the file, so adding a member to any info struct needs no change here, including
+new nested structs, fixed-size arrays and `XYZVectorF` members (pinned by
+`tests/test_normalize.py::TestNewFieldsNeedNoCodeChange`, which normalizes invented members
+appearing in no header). What does need a table row is a new *branch* or a new *struct
+type*: one line in `TRACK_COMPANIONS`, `FIXED_COLLECTIONS` or `CONFIGURABLE_COLLECTIONS`.
+README.md has the full breakdown.
+
+**Four normalization bugs found and fixed while answering that question**, all in the
+depth-1 split path, all from having special-cased `fCoordinates` instead of handling nested
+names generically: fixed-size arrays kept ROOT's dimension in the name (`PEsPerLayer[4]`),
+nested struct members stayed dotted (`prel._rel`, so unreachable as an attribute and
+inconsistent with depth 2), ROOT's path-form duplicates leaked through as a field called
+`pos/pos`, and `event.collection()` on those was unusable. `normalize.py` now re-nests any
+dotted name generically.
+
+**One real correctness bug found and fixed: `trkcalohitmc` is not track-aligned.** The maker
+pushes an entry only for tracks with a calo cluster (140 of 375 in the sample file) and
+stores no back-index, so indexing it by track number returned the wrong object.
+`Track.calohitmc()` now recovers the mapping by counting tracks with `trkcalohit.did >= 0`
+and verifies the count, and every depth-1 companion is length-checked at access time so a
+future branch with this shape fails loudly. All 140 entries verified against the raw branch.
 
 **Two things found while building, neither a pyevtana bug.** `trksegpars_lh.raderr` is
 genuinely `NaN` for 184 of 6772 entries in the sample file. And ROOT prefixes the leaves of

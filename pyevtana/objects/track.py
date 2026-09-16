@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from typing import Optional
 
+import awkward as ak
+
 from .. import schema as S
 from ..collection import ObjectCollection
-from ..missing import MissingRecord, is_missing
+from ..missing import MissingRecord, SchemaMismatch, is_missing
 from ..record import RecordProxy
 from ..surfaces import surface_id, surface_name
 
@@ -53,6 +55,13 @@ class TrackMC(RecordProxy):
     _repr_fields = ("nhits", "nactive", "t0")
 
 
+class TrackCaloHitMC(RecordProxy):
+    """``CaloClusterInfoMC`` for the cluster on a track."""
+
+    __slots__ = ()
+    _repr_fields = ("nhits", "etot", "tavg")
+
+
 class MVAResult(RecordProxy):
     __slots__ = ()
     _repr_fields = ("result",)
@@ -87,6 +96,16 @@ class Track(RecordProxy):
 
         if as_collection:
             return ObjectCollection(arr[self._i], cls, name, coll._batch, coll._ievt, tag)
+
+        # A depth-1 companion is read by track index, which assumes the maker pushed one
+        # entry per track. Verify it instead of trusting it: `trkcalohitmc` does not obey
+        # this (see calohitmc), and a future branch might not either.
+        if len(arr) != len(coll._arr):
+            raise SchemaMismatch(
+                f"{name!r} has {len(arr)} entries but this event has {len(coll._arr)} "
+                f"tracks, so it cannot be indexed by track. This branch is not "
+                f"track-aligned; read it as a whole with event.collection({name!r})."
+            )
         return cls(arr[self._i], ObjectCollection(arr, cls, name, coll._batch, coll._ievt, tag), self._i)
 
     # -- reco ------------------------------------------------------------------------------
@@ -183,7 +202,53 @@ class Track(RecordProxy):
         return self._companion("hitsmc", RecordProxy)
 
     def calohitmc(self):
-        return self._companion("calohitmc", RecordProxy, collection=False)
+        """MC truth for this track's calorimeter cluster.
+
+        ``trkcalohitmc`` is **not** track-aligned. ``EventNtupleMaker`` pushes an entry
+        only for tracks that have a calo cluster (``EventNtupleMaker_module.cc``: the
+        ``kseed.hasCaloCluster() && fillCaloTrackMatchMC()`` guard), and stores no index
+        back to the track -- so on a typical file it is much shorter than the track list
+        (140 entries for 375 tracks in the sample ntuple).
+
+        The mapping is recovered by counting: the k-th entry belongs to the k-th track,
+        in order, that has a calo cluster. A track has one exactly when its
+        ``trkcalohit.did >= 0``, because the maker fills that field under the same
+        ``hasCaloCluster()`` guard. The recovered count is checked against the actual
+        length, so if the maker ever changes this you get an error rather than a
+        silently wrong object.
+
+        Returns a falsy ``MissingRecord`` for a track with no calo cluster.
+        """
+        coll = self._coll
+        name = S.track_branch(coll.tag, "calohitmc")
+        mc = coll._sibling(name, hint=S.absent_hint("calohitmc"))
+        if is_missing(mc):
+            return MissingRecord(mc.name, mc.state, mc.reason)
+
+        calohit_name = S.track_branch(coll.tag, "calohit")
+        calohit = coll._sibling(calohit_name)
+        if is_missing(calohit):
+            raise SchemaMismatch(
+                f"{name!r} is not track-aligned, so mapping it onto tracks needs "
+                f"{calohit_name!r}, which is {calohit.state.value}. Select it too, or "
+                f"read {name!r} as a whole with event.collection({name!r})."
+            )
+
+        has_cluster = calohit["did"] >= 0
+        if not bool(has_cluster[self._i]):
+            return MissingRecord(name, hint="this track has no calo cluster")
+
+        expected = int(ak.sum(has_cluster))
+        if len(mc) != expected:
+            raise SchemaMismatch(
+                f"cannot map {name!r} onto tracks: {len(mc)} entries but {expected} "
+                f"tracks in this event have a calo cluster. The maker's fill condition "
+                f"for {name!r} no longer matches trkcalohit.did >= 0."
+            )
+        rank = int(ak.sum(has_cluster[:self._i]))
+        return TrackCaloHitMC(
+            mc[rank], ObjectCollection(mc, TrackCaloHitMC, name, coll._batch, coll._ievt,
+                                       coll.tag), rank)
 
     # -- convenience -------------------------------------------------------------------------
 

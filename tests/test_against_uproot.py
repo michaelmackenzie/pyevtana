@@ -16,18 +16,20 @@ from base import NtupleTestCase
 
 
 def _raw_names(collection):
-    """Map normalized field name -> leaf name in the file.
+    """Map cleaned field path -> leaf name in the file.
 
     ROOT prefixes the leaves of some split branches with the branch name (``trk.pdg``,
-    ``lumistream.nTrackerHits``) and not others (``evtinfo`` and ``crvsummary``, written
-    without a trailing dot), so the mapping is derived from the real leaf names rather
-    than assumed.
+    ``lumistream.nTrackerHits``) and not others (``evtinfo``, ``crvsummary``, written
+    without a trailing dot); it also appends array dimensions (``PEsPerLayer[4]``) and
+    emits path-form duplicates (``pos/pos.fCoordinates.fX``). The mapping is derived with
+    the same cleaning the normalizer uses, rather than assumed.
     """
-    from pyevtana.normalize import strip_prefix
+    from pyevtana.normalize import clean_field_name, is_path_form
 
     if not collection.split:
         return None
-    return {strip_prefix(leaf, collection.name): leaf for leaf in collection.selected}
+    return {clean_field_name(leaf, collection.name): leaf
+            for leaf in collection.selected if not is_path_form(leaf)}
 
 
 def _fields_of(array):
@@ -37,22 +39,41 @@ def _fields_of(array):
         return []
 
 
-def assert_arrays_equal(case, got, expect, label):
-    """Compare two arrays, walking into nested structs, treating NaN as equal to NaN.
+def _navigate(array, path):
+    """Follow a dotted path into an unsplit (nested-record) array."""
+    for part in path.split("."):
+        array = array[part]
+    return array
 
-    Two wrinkles this has to handle, both properties of the data rather than of pyevtana:
-    some members are themselves structs (``SimInfo.prirel`` is an ``MCRelationship``) and
-    numpy has no ``==`` for those, so records are compared field by field; and some float
-    members are genuinely NaN in the file (184 of ``trksegpars_lh.raderr`` here), which
-    never compares equal to itself.
+
+def _resolve(raw, names, key):
+    """Raw array for a cleaned field path, in a split branch.
+
+    Usually the path is a leaf name. Sometimes ROOT gives a sub-branch instead, whose
+    value is itself a record with dotted field names (``crvsummarymc.pos``), so fall back
+    to the nearest ancestor that is a leaf and index into it.
+    """
+    if key in names:
+        return raw[names[key]]
+    parts = key.split(".")
+    for i in range(len(parts) - 1, 0, -1):
+        head = ".".join(parts[:i])
+        if head in names:
+            array = raw[names[head]]
+            rest = ".".join(parts[i:])
+            for candidate in (key, rest, f"{head}.{rest}"):
+                if candidate in _fields_of(array):
+                    return array[candidate]
+    raise KeyError(f"no raw leaf for {key!r}; available: {sorted(names)[:8]}")
+
+
+def assert_leaves_equal(case, got, expect, label):
+    """Compare two leaf arrays, treating NaN as equal to NaN.
+
+    Some float members are genuinely NaN in the file (184 of ``trksegpars_lh.raderr``
+    here), and NaN never compares equal to itself.
     """
     import numpy as np
-
-    fields = _fields_of(got)
-    if fields:
-        for field in fields:
-            assert_arrays_equal(case, got[field], expect[field], f"{label}.{field}")
-        return
 
     flat_got = ak.to_numpy(ak.flatten(got, axis=None))
     flat_expect = ak.to_numpy(ak.flatten(expect, axis=None))
@@ -62,6 +83,35 @@ def assert_arrays_equal(case, got, expect, label):
         case.assertTrue(bool(np.all(same)), label)
     else:
         case.assertTrue(bool(np.all(flat_got == flat_expect)), label)
+
+
+def compare(case, got, raw, names, path, counter):
+    """Walk a normalized array against the raw one, whatever nesting the normalizer built.
+
+    Handles the three shapes normalization produces: rebuilt vectors (compared against
+    the original fX/fY/fZ leaves), re-nested sub-records such as ``prel`` (compared field
+    by field -- numpy has no ``==`` for an ``MCRelationship``), and plain leaves.
+    """
+    fields = _fields_of(got)
+
+    if set(fields) == {"x", "y", "z"}:
+        for axis, component in zip("xyz", COMPONENTS):
+            key = f"{path}.{COORD}.{component}"
+            expect = (_resolve(raw, names, key) if names
+                      else _navigate(raw, path)[COORD][component])
+            assert_leaves_equal(case, got[axis], expect, f"{path}.{axis}")
+            counter[0] += 1
+        return
+
+    if fields:
+        for field in fields:
+            compare(case, got[field], raw, names, f"{path}.{field}" if path else field,
+                    counter)
+        return
+
+    expect = _resolve(raw, names, path) if names else _navigate(raw, path)
+    assert_leaves_equal(case, got, expect, path)
+    counter[0] += 1
 
 
 class TestEveryCollectionMatchesUproot(NtupleTestCase):
@@ -74,7 +124,7 @@ class TestEveryCollectionMatchesUproot(NtupleTestCase):
 
     def test_every_leaf_of_every_collection(self):
         checked_collections = 0
-        checked_fields = 0
+        counter = [0]
 
         for info in self.dataset.schema.collections.values():
             if info.state is not BranchState.LOADED:
@@ -88,29 +138,10 @@ class TestEveryCollectionMatchesUproot(NtupleTestCase):
             checked_collections += 1
             names = _raw_names(info)
             for field in got.fields:
-                value = got[field]
-                if set(getattr(value, "fields", []) or []) == {"x", "y", "z"}:
-                    # rebuilt vector: compare against the original components
-                    if info.split:
-                        for component, axis in zip(COMPONENTS, "xyz"):
-                            expect = raw[names[f"{field}.{COORD}.{component}"]]
-                            assert_arrays_equal(self, value[axis], expect,
-                                                f"{info.name}.{field}.{axis}")
-                            checked_fields += 1
-                    else:
-                        coords = raw[field][COORD]
-                        for component, axis in zip(COMPONENTS, "xyz"):
-                            assert_arrays_equal(self, value[axis], coords[component],
-                                                f"{info.name}.{field}.{axis}")
-                            checked_fields += 1
-                    continue
-
-                expect = raw[names[field] if names else field]
-                assert_arrays_equal(self, value, expect, f"{info.name}.{field}")
-                checked_fields += 1
+                compare(self, got[field], raw, names, field, counter)
 
         self.assertGreater(checked_collections, 10)
-        self.assertGreater(checked_fields, 100)
+        self.assertGreater(counter[0], 100)
 
     def test_object_loop_agrees_with_arrays(self):
         """What the proxies serve is what the arrays hold, event by event."""

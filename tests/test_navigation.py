@@ -153,3 +153,56 @@ class TestSeedHits(NtupleTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNonAlignedCompanion(NtupleTestCase):
+    """`trkcalohitmc` is not indexed by track; the mapping is recovered and verified."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.raw = cls.tree["trkcalohitmc"].arrays(
+            ["trkcalohitmc.nhits", "trkcalohitmc.etot"])
+        cls.events = list(Dataset(cls.path))
+
+    def test_it_really_is_shorter_than_the_track_list(self):
+        """If this ever stops being true the mapping code is no longer needed."""
+        n_mc = sum(len(self.raw["trkcalohitmc.nhits"][e.index]) for e in self.events)
+        n_trk = sum(len(e.Tracks()) for e in self.events)
+        self.assertLess(n_mc, n_trk)
+
+    def test_entries_map_to_the_right_tracks(self):
+        """The k-th entry belongs to the k-th track with a calo cluster."""
+        matched = 0
+        for event in self.events:
+            k = 0
+            for track in event.Tracks():
+                mc = track.calohitmc()
+                if is_missing(mc):
+                    self.assertLess(track.calohit().did, 0)
+                    continue
+                self.assertGreaterEqual(track.calohit().did, 0)
+                self.assertEqual(mc.nhits, self.raw["trkcalohitmc.nhits"][event.index][k])
+                self.assertEqual(mc.etot, self.raw["trkcalohitmc.etot"][event.index][k])
+                k += 1
+                matched += 1
+            self.assertEqual(k, len(self.raw["trkcalohitmc.nhits"][event.index]))
+        self.assertGreater(matched, 100)
+
+    def test_track_without_a_cluster_gets_a_falsy_record(self):
+        for event in self.events:
+            for track in event.Tracks():
+                if track.calohit().did < 0:
+                    mc = track.calohitmc()
+                    self.assertTrue(is_missing(mc))
+                    self.assertFalse(mc)
+                    self.assertIn("no calo cluster", mc.reason)
+                    return
+        self.skipTest("every track has a calo cluster")
+
+    def test_aligned_companions_are_still_indexed_directly(self):
+        """The guard must not disturb the companions that *are* track-aligned."""
+        raw_mc = self.tree["trkmc"].arrays(["trkmc.nhits"])["trkmc.nhits"]
+        for event in self.events[:20]:
+            for j, track in enumerate(event.Tracks()):
+                self.assertEqual(track.mc().nhits, raw_mc[event.index][j])

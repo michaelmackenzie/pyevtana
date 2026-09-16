@@ -215,6 +215,51 @@ These totals must cover **every** file, including any `on_error="skip"` dropped 
 normalization from all files divided into a yield from a subset is silently wrong, so
 `DatasetSummary` reports what it could not read instead of quietly omitting it.
 
+## Maintenance: what tracks the C++ headers, and what doesn't
+
+**Struct fields are never enumerated in this package.** `RecordProxy.__getattr__` reads
+straight from the awkward record, whose fields come from the file, so:
+
+| change in EventNtuple | what pyevtana needs |
+|---|---|
+| add / rename / remove a member of `TrkInfo.hh` (or any info struct) | **nothing** |
+| add a member of a *new* nested type, a fixed-size array, an `XYZVectorF` | **nothing** — handled generically |
+| a file older than the headers, missing a recently-added member | **nothing** — that field is simply absent |
+| add a new companion branch, e.g. `<tag>newthing` | one row in `TRACK_COMPANIONS` (`schema.py`) |
+| add a new fixed-name collection, e.g. `calonewthings` | one row in `FIXED_COLLECTIONS` |
+| add a collection with a fhicl-configurable name | one row in `CONFIGURABLE_COLLECTIONS`, keyed by struct |
+
+`tests/test_normalize.py::TestNewFieldsNeedNoCodeChange` pins the first three rows by
+normalizing invented members (`brandNewScalar`, `brandNewArray[3]`,
+`brandNewNested._alpha`, `brandNewVec.fCoordinates.*`) that appear in no header.
+
+Field names *do* appear in four places, none of which is a per-struct list:
+
+1. **`_repr_fields`** on each proxy — display hints only. A stale one prints less in
+   `repr()`; nothing else breaks.
+2. **`vectors.MOMENTUM_FIELDS`** — which names get `Momentum3D` (with `.pt`, `.p`) rather
+   than `Vector3D`. A new momentum member named something else still works as a vector,
+   just without the momentum aliases.
+3. **Link fields** in `objects/calo.py` and `objects/crv.py` (`hits_`, `recoDigis_`,
+   `clusterIdx_`, `caloHitIdx_`, `crvHitIndex`, ...), tabulated in `schema.INDEX_LINKS`.
+   These are genuine couplings: rename one in Offline and that navigation method breaks,
+   loudly.
+4. **`schema.NON_ALIGNED_COMPANIONS`** — see below.
+
+### One branch that is not track-aligned
+
+`trkcalohitmc` is the exception to "companion index == track index". `EventNtupleMaker`
+pushes an entry only for tracks that have a calo cluster and stores no back-index, so it is
+shorter than the track list (140 entries for 375 tracks in the sample file). `track.calohitmc()`
+recovers the mapping by counting — the k-th entry belongs to the k-th track with
+`trkcalohit.did >= 0`, which the maker fills under the same `hasCaloCluster()` guard — and
+**checks the recovered count against the actual length**, so if the maker's condition ever
+changes you get a `SchemaMismatch` rather than a silently wrong object. A track with no
+cluster gets a falsy `MissingRecord`.
+
+Every other depth-1 companion is verified to be track-aligned at access time by the same
+guard, so a future branch with this shape fails loudly instead of returning the wrong row.
+
 ## Tests
 
 ```bash
@@ -223,6 +268,6 @@ cd /exp/mu2e/app/users/mmackenz/main/pyevtana
 PYTHONPATH=.:tests python3 -m unittest discover -s tests -t tests -v
 ```
 
-89 tests, stdlib `unittest` (the `rootana` environment has no pytest; pytest collects them
+107 tests, stdlib `unittest` (the `rootana` environment has no pytest; pytest collects them
 too if you have it). `test_against_uproot.py` walks every field of every collection and
 compares it against a direct uproot read.

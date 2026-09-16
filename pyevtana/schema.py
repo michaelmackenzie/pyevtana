@@ -141,6 +141,13 @@ TRIGGER_PREFIX = "trig_"
 #: Prefix for the per-track-collection counters (``tcnt.n<branchname>``).
 TCNT_PREFIX = "tcnt."
 
+#: Track companions that are NOT indexed by track number. The maker pushes an entry only
+#: under some condition, and stores no back-index, so the mapping has to be recovered.
+#: role -> (gating companion, gating field, comparison) -- see Track.calohitmc.
+NON_ALIGNED_COMPANIONS: dict[str, tuple[str, str, str]] = {
+    "calohitmc": ("calohit", "did", ">=0"),
+}
+
 #: Object-to-object links that are *not* positional.  ``(field, target, kind)`` where kind is
 #: "indices" (a vector of indices), "index" (a single index, -1 = none) or "backref"
 #: (the target's field points back at us).
