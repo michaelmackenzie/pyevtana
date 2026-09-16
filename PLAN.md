@@ -7,7 +7,7 @@
 
 ## Status (2026-09-16)
 
-**Built and tested: all phases. 107 tests pass** (`PYTHONPATH=.:tests python3 -m unittest
+**Built and tested: all phases. 122 tests pass** (`PYTHONPATH=.:tests python3 -m unittest
 discover -s tests -t tests`), stdlib `unittest` because the `rootana 2.5.0` environment has
 no pytest. See [README.md](README.md) for usage.
 
@@ -21,6 +21,7 @@ no pytest. See [README.md](README.md) for usage.
 | 5 calo + CRV navigation | done — `objects/calo.py`, `objects/crv.py` |
 | 6 time clusters, line seeds, helices, MC steps | **code done, not validated on a real file** — see below |
 | 7 metadata, subruns, docs | done — `metadata.py`, `README.md`, `examples/` |
+| 8 worked analysis example | done — `examples/07_signal_selection.py`, regression-tested |
 
 **Validated against real data.** Everything above is exercised against
 `/exp/mu2e/app/users/mmackenz/main/nts.owner.description.version.sequencer.root`

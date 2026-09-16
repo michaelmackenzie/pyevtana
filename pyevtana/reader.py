@@ -14,16 +14,31 @@ import glob as _glob
 import os
 from typing import Iterator, Optional, Sequence, Union
 
+import awkward as ak
 import uproot
 
 from . import schema as S
 from .discovery import NtupleSchema, discover, read_metadata
 from .missing import (BranchState, MissingBranch, MissingCollection, ON_MISSING_MODES,
                       PyEvtAnaError, resolve_missing)
+from .columns import Columns
 from .normalize import normalize
 from .select import SelectSpec, Selector
 
 PathLike = Union[str, os.PathLike]
+
+
+def default_handler(path: str):
+    """uproot source handler for a path.
+
+    uproot's default source reopens the file for every read request -- 364 opens while
+    reading eight branches of one EventNtuple, which measured 1.9x slower than mapping the
+    file once. For an ordinary filesystem path (including NFS and /pnfs) ``MemmapSource``
+    opens it once; remote URLs keep uproot's default, which is what they need.
+    """
+    if "://" in str(path):
+        return None
+    return uproot.source.file.MemmapSource
 
 
 # --------------------------------------------------------------------------------------
@@ -69,13 +84,14 @@ def resolve_files(files: Union[PathLike, Sequence[PathLike]]) -> list[str]:
 class Batch:
     """One entry window of one file, plus the branches read so far."""
 
-    __slots__ = ("reader", "start", "stop", "_cache", "_leaves")
+    __slots__ = ("reader", "start", "stop", "_cache", "_objects", "_leaves")
 
     def __init__(self, reader: "FileReader", start: int, stop: int):
         self.reader = reader
         self.start = start
         self.stop = stop
         self._cache: dict = {}
+        self._objects: dict = {}
         self._leaves: dict = {}
 
     def __len__(self) -> int:
@@ -124,6 +140,26 @@ class Batch:
             return array
         return array[index]
 
+    def columns(self, name: str, hint: str = ""):
+        """The collection as lazily converted per-field Python lists.
+
+        The object API reads through here rather than indexing awkward per object: a
+        scalar read costs ~0.1 us against Python lists versus ~58 us against awkward, and
+        fields are converted only when something reads them. :meth:`get` still serves the
+        array path, so nothing about ``.array()`` changes.
+        """
+        cached = self._objects.get(name)
+        if cached is not None:
+            return cached
+
+        array = self.get(name, hint=hint)
+        if isinstance(array, MissingCollection):
+            self._objects[name] = array
+            return array
+        columns = Columns(array)
+        self._objects[name] = columns
+        return columns
+
     def leaf(self, name: str, index: int):
         """A standalone scalar leaf (``trig_*``, ``tcnt.n*``), cached per window."""
         values = self._leaves.get(name)
@@ -154,16 +190,17 @@ class Batch:
 class FileReader:
     """An open file: its schema, and batches over it."""
 
-    __slots__ = ("path", "tree_path", "selector", "on_missing", "io_kwargs",
+    __slots__ = ("path", "tree_path", "selector", "on_missing", "io_kwargs", "handler",
                  "_file", "_tree", "_schema")
 
     def __init__(self, path: str, tree_path: str, selector: Selector, on_missing: str,
-                 io_kwargs: Optional[dict] = None):
+                 io_kwargs: Optional[dict] = None, handler="auto"):
         self.path = path
         self.tree_path = tree_path
         self.selector = selector
         self.on_missing = on_missing
         self.io_kwargs = io_kwargs or {}
+        self.handler = handler
         self._file = None
         self._tree = None
         self._schema: Optional[NtupleSchema] = None
@@ -174,7 +211,13 @@ class FileReader:
 
     def open(self) -> "FileReader":
         if self._tree is None:
-            self._file = uproot.open(self.path)
+            handler = default_handler(self.path) if self.handler == "auto" else self.handler
+            try:
+                self._file = uproot.open(self.path, handler=handler) if handler \
+                    else uproot.open(self.path)
+            except Exception:
+                # any handler-specific failure falls back to uproot's own choice
+                self._file = uproot.open(self.path)
             try:
                 self._tree = self._file[self.tree_path]
             except Exception:
@@ -253,7 +296,8 @@ class Dataset:
 
     def __init__(self, files, tree: str = S.DEFAULT_TREE, branches: SelectSpec = None,
                  required: Optional[Sequence[str]] = None, on_missing: str = "strict",
-                 step_size: Union[str, int] = "100 MB", io_threads: int = 0):
+                 step_size: Union[str, int] = "100 MB", io_threads: int = 0,
+                 handler="auto"):
         if on_missing not in ON_MISSING_MODES:
             raise ValueError(f"on_missing must be one of {ON_MISSING_MODES}, got {on_missing!r}")
         self.paths = resolve_files(files)
@@ -263,6 +307,7 @@ class Dataset:
         self.on_missing = on_missing
         self.step_size = step_size
         self.io_threads = io_threads
+        self.handler = handler
         self.errors: list[tuple[str, str]] = []
         self._selector = Selector(branches)
         self._readers: dict[str, FileReader] = {}
@@ -287,7 +332,7 @@ class Dataset:
         reader = self._readers.get(path)
         if reader is None:
             reader = FileReader(path, self.tree_path, self._selector, self.on_missing,
-                                self.io_kwargs)
+                                self.io_kwargs, self.handler)
             reader.open()
             if self.required:
                 reader.check_required(self.required)

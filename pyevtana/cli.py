@@ -31,6 +31,7 @@ def format_schema(schema: NtupleSchema, selector: Selector = None) -> str:
         add(f"branches  : {selector!r}")
     add("")
     add("legend: [+] loaded   [-] present but excluded by branches=   [ ] absent")
+    add("sizes are compressed bytes; unsplit branches must be read whole")
     add("")
 
     for tag, track in sorted(schema.tracks.items()):
@@ -84,10 +85,26 @@ def format_schema(schema: NtupleSchema, selector: Selector = None) -> str:
     return "\n".join(out)
 
 
+def _humanize(nbytes: int) -> str:
+    if not nbytes:
+        return " " * 9
+    if nbytes >= 1e6:
+        return f"{nbytes / 1e6:6.1f} MB"
+    return f"{nbytes / 1e3:6.1f} kB"
+
+
 def _leafcount(info) -> str:
+    """Leaf count plus size, so the I/O cost of touching a branch is visible.
+
+    An unsplit branch is all-or-nothing: ROOT cannot split a ``vector<vector<T>>``, so
+    reading one field of it costs the whole branch. On a typical EventNtuple that is where
+    the read time goes -- ``trksegpars_lh`` is 32 MB and an analysis often wants one of
+    its fifteen fields.
+    """
+    size = _humanize(info.nbytes)
     if not info.split:
-        return "(unsplit)"
-    return f"{len(info.selected)}/{len(info.leaves)} leaves"
+        return f"{size}  (unsplit: reading any field reads all {len(info.leaves) or ''}".rstrip() + " fields)"
+    return f"{size}  {len(info.selected)}/{len(info.leaves)} leaves"
 
 
 def main(argv=None) -> int:

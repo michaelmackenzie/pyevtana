@@ -9,10 +9,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-import awkward as ak
-
 from .. import schema as S
-from ..collection import ObjectCollection
+from ..collection import event_collection, nested_collection
 from ..missing import MissingRecord, SchemaMismatch, is_missing
 from ..record import RecordProxy
 from ..surfaces import surface_id, surface_name
@@ -87,26 +85,27 @@ class Track(RecordProxy):
         depth = S.track_depth(role)
         as_collection = (depth == 2) if collection is None else collection
 
-        arr = coll._sibling(name, hint=S.absent_hint(role))
-        if is_missing(arr):
+        cols = coll._sibling(name, hint=S.absent_hint(role))
+        if is_missing(cols):
             # Preserve the reason; just change the shape of the null object.
             if as_collection:
-                return arr
-            return MissingRecord(arr.name, arr.state, arr.reason)
+                return cols
+            return MissingRecord(cols.name, cols.state, cols.reason)
 
         if as_collection:
-            return ObjectCollection(arr[self._i], cls, name, coll._batch, coll._ievt, tag)
+            return nested_collection(cols, coll._ievt, self._i, cls, name, coll._batch, tag)
 
         # A depth-1 companion is read by track index, which assumes the maker pushed one
         # entry per track. Verify it instead of trusting it: `trkcalohitmc` does not obey
         # this (see calohitmc), and a future branch might not either.
-        if len(arr) != len(coll._arr):
+        parent = event_collection(cols, coll._ievt, cls, name, coll._batch, tag)
+        if len(parent) != len(coll):
             raise SchemaMismatch(
-                f"{name!r} has {len(arr)} entries but this event has {len(coll._arr)} "
+                f"{name!r} has {len(parent)} entries but this event has {len(coll)} "
                 f"tracks, so it cannot be indexed by track. This branch is not "
                 f"track-aligned; read it as a whole with event.collection({name!r})."
             )
-        return cls(arr[self._i], ObjectCollection(arr, cls, name, coll._batch, coll._ievt, tag), self._i)
+        return cls(parent, self._i)
 
     # -- reco ------------------------------------------------------------------------------
 
@@ -130,18 +129,37 @@ class Track(RecordProxy):
 
         Returns ``None`` when the track has no intersection with that surface -- a normal
         outcome, not an error, so callers must check.
+
+        The scan runs over the raw field dicts and wraps only the match, rather than
+        building a proxy for every segment on the track; with ~17 segments per track and
+        this called once per surface of interest, that is most of the proxies avoided.
         """
         want = surface_id(surface)
         segs = self.segs()
         if is_missing(segs):
             return None
         seen = 0
-        for seg in segs:
-            if seg.sid == want:
+        for position, sid in enumerate(segs._column("sid")):
+            if sid == want:
                 if seen == index:
-                    return seg
+                    return segs[position]
                 seen += 1
         return None
+
+    def segs_at(self, surface) -> list:
+        """Every segment at ``surface``, in stored order.
+
+        A track can cross the same surface more than once -- a reflected track crosses
+        ``TT_Front`` twice, once going upstream and once going downstream -- so an
+        analysis that cares about direction must pick the crossing it means rather than
+        take :meth:`seg`, which returns the first.
+        """
+        want = surface_id(surface)
+        segs = self.segs()
+        if is_missing(segs):
+            return []
+        return [segs[position] for position, sid in enumerate(segs._column("sid"))
+                if sid == want]
 
     def segpars(self, parametrization: Optional[str] = None):
         """LoopHelix / CentralHelix / KinematicLine parameters at each surface.
@@ -221,34 +239,36 @@ class Track(RecordProxy):
         """
         coll = self._coll
         name = S.track_branch(coll.tag, "calohitmc")
-        mc = coll._sibling(name, hint=S.absent_hint("calohitmc"))
-        if is_missing(mc):
-            return MissingRecord(mc.name, mc.state, mc.reason)
+        mc_cols = coll._sibling(name, hint=S.absent_hint("calohitmc"))
+        if is_missing(mc_cols):
+            return MissingRecord(mc_cols.name, mc_cols.state, mc_cols.reason)
+        mc = event_collection(mc_cols, coll._ievt, TrackCaloHitMC, name, coll._batch, coll.tag)
 
         calohit_name = S.track_branch(coll.tag, "calohit")
-        calohit = coll._sibling(calohit_name)
-        if is_missing(calohit):
+        calohit_cols = coll._sibling(calohit_name)
+        if is_missing(calohit_cols):
+            calohit = calohit_cols
             raise SchemaMismatch(
                 f"{name!r} is not track-aligned, so mapping it onto tracks needs "
                 f"{calohit_name!r}, which is {calohit.state.value}. Select it too, or "
                 f"read {name!r} as a whole with event.collection({name!r})."
             )
+        calohit = event_collection(calohit_cols, coll._ievt, TrackCaloHit, calohit_name,
+                                   coll._batch, coll.tag)
 
-        has_cluster = calohit["did"] >= 0
-        if not bool(has_cluster[self._i]):
+        has_cluster = [did >= 0 for did in calohit._column("did")]
+        if not has_cluster[self._i]:
             return MissingRecord(name, hint="this track has no calo cluster")
 
-        expected = int(ak.sum(has_cluster))
+        expected = sum(has_cluster)
         if len(mc) != expected:
             raise SchemaMismatch(
                 f"cannot map {name!r} onto tracks: {len(mc)} entries but {expected} "
                 f"tracks in this event have a calo cluster. The maker's fill condition "
                 f"for {name!r} no longer matches trkcalohit.did >= 0."
             )
-        rank = int(ak.sum(has_cluster[:self._i]))
-        return TrackCaloHitMC(
-            mc[rank], ObjectCollection(mc, TrackCaloHitMC, name, coll._batch, coll._ievt,
-                                       coll.tag), rank)
+        rank = sum(has_cluster[:self._i])
+        return TrackCaloHitMC(mc, rank)
 
     # -- convenience -------------------------------------------------------------------------
 

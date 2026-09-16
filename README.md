@@ -69,6 +69,9 @@ a guess.
 | `event.trigger(name)`, `event.triggers()`, `event.ntracks(tag)` | trigger and counters |
 | `event.collection(name)` | anything not covered above |
 
+`track.seg(surface)` returns the first crossing; `track.segs_at(surface)` returns them all,
+which is what you want when a track crosses a surface more than once.
+
 Lowercase aliases (`event.tracks(...)`) exist for all of them.
 
 ### Navigating
@@ -215,6 +218,105 @@ These totals must cover **every** file, including any `on_error="skip"` dropped 
 normalization from all files divided into a yield from a subset is silently wrong, so
 `DatasetSummary` reports what it could not read instead of quietly omitting it.
 
+## Examples
+
+```
+examples/01_track_loop.py            tracks, segments, hits
+examples/02_calo_cluster_hits.py     index-following into calohits
+examples/03_timeclusters_lineseeds.py  collections with fhicl-configurable names
+examples/04_hybrid_vectorized.py     object loop and .array() side by side
+examples/05_slim_io.py               branches= and what it saves
+examples/06_parallel_dataset.py      Dataset.map over a multi-file dataset
+examples/07_signal_selection.py      a full analysis selection with a per-event cut flow
+```
+
+`07_signal_selection.py` is the worked one: it histograms p, pT, cos(theta), t and cluster
+energy for downstream electron tracks (pz at `TT_Mid` > 0, |fit PDG| == 11) in three sets
+-- all, p > 90 MeV/c, and passing a 16-cut selection -- and prints the selection as a
+**per-event** cut flow (events holding at least one surviving track at each stage). It also
+shows a trap worth knowing: a track can cross `TT_Front` twice, and the first crossing is
+the upstream-going one, so direction-sensitive quantities must use `track.segs_at(surface)`
+rather than `track.seg(surface)`.
+
+## Performance
+
+Measured on one file of `CeMLeadingLogMix1BB` (8212 events, ~3.9 tracks/event, ~17
+segments/track), warm page cache, running the full selection of
+`examples/07_signal_selection.py`. Reproduce with `benchmarks/`.
+
+| | events/s |
+|---|---|
+| object loop, as first written | 47.7 |
+| object loop, now | **1510** |
+| pyevtana array path | 2824 |
+| pyfitter / pyutils, same files | 1841 |
+
+The object loop is **31.7x faster** than the first implementation, with byte-identical
+physics. Where the time goes now:
+
+| component | share |
+|---|---|
+| uproot read + normalization | 45% |
+| per-field `to_list` | 14% |
+| Python object loop | 41% |
+
+### What was slow, and what fixed it
+
+**Awkward scalar access, ~58 us per field read.** `arr[i]` costs ~41 us and
+`record[field]` a further ~17 us: awkward builds an error context, dispatches a backend
+and re-wraps the layout on *every* scalar read. At a few hundred reads per track that was
+essentially the whole runtime. Proxies now read Python lists converted once per batch
+(`columns.py`), where the same read is ~0.13 us.
+
+**Converting fields nothing reads.** `ak.to_list` on a record array builds a dict per
+object -- 4.60 us per segment, against 0.05 us for one scalar field. Conversion is now per
+field on first use: this selection converts **15 of 76** available fields.
+
+**Vector fields.** `XYZVectorF` converted to `{"x","y","z"}` dicts cost about twice what
+the three components cost separately, and `trksegs.mom` was the single largest conversion.
+`VectorColumn` keeps the components and builds a `Vec3` only for objects actually read;
+`Vec3` itself is 30x cheaper to construct than a `vector` object (0.51 vs 15.3 us) and
+gives the same `.mag`, `.pt`, `.rho`, `.phi`, `.theta`, `.eta`.
+
+**uproot's default source reopens the file.** Reading eight branches of one EventNtuple
+triggered **364 opens** of the same file. `Dataset` now passes `MemmapSource` for ordinary
+filesystem paths, which opens it once and is **1.9x faster on the read** -- worth knowing
+for any uproot-based framework, not just this one. Remote URLs keep uproot's default.
+Override with `Dataset(..., handler=...)`.
+
+**What did not help:** `io_threads` (uproot's decompression executor) made this workload
+*slower* at 2, 4 and 8 threads -- the pool overhead exceeds the gain when the branches are
+small and the cache is warm. Normalization is not worth optimizing either: it is 4.3% of
+read+normalize and 1.9% of the whole run, and it defers nothing -- a normalized array
+converts to Python marginally *faster* than the raw one, because `ak.zip` builds a view
+over the existing buffers rather than copying.
+
+**Where the read time actually goes: unsplit branches.** ROOT cannot split a
+`vector<vector<T>>`, so every depth-2 branch is all-or-nothing -- reading one field of
+`trksegpars_lh` costs the whole 32 MB branch, and on this selection that single field
+(`t0err`) is 0.56 s of the 1.56 s read. `trksegs` and `trksegpars_lh` together are 85% of
+it. Nothing in pyevtana can avoid that, so `pyevtana-describe` now prints each branch's
+compressed size and marks the unsplit ones, making the cost of touching one visible before
+you write the loop.
+
+### Writing a fast analysis on top of this
+
+The two biggest wins in `examples/07_signal_selection.py` were in the analysis, not the
+framework:
+
+- **Fill histograms in bulk.** `Hist.fill(scalar)` costs ~33 us per value; filling the
+  same values as one array is ~5000x cheaper per value for identical contents. Filling one
+  value at a time was costing more than reading the data. Accumulate into a list, fill
+  once (see `Collector`).
+- **Scan segments once.** A track's segments are the most expensive thing to walk, so
+  build the per-event picture in a single pass rather than re-deriving it, and cache
+  derived quantities on the candidate (`cached_property`) -- `seg.mom` builds a fresh
+  vector on every access.
+
+Beyond that: pass `branches=` so nothing unused is read, use `track.seg()`/`segs_at()`
+rather than iterating `segs()` yourself, and drop to `.array()` for anything that is a
+whole-dataset reduction.
+
 ## Maintenance: what tracks the C++ headers, and what doesn't
 
 **Struct fields are never enumerated in this package.** `RecordProxy.__getattr__` reads
@@ -268,6 +370,6 @@ cd /exp/mu2e/app/users/mmackenz/main/pyevtana
 PYTHONPATH=.:tests python3 -m unittest discover -s tests -t tests -v
 ```
 
-107 tests, stdlib `unittest` (the `rootana` environment has no pytest; pytest collects them
+122 tests, stdlib `unittest` (the `rootana` environment has no pytest; pytest collects them
 too if you have it). `test_against_uproot.py` walks every field of every collection and
 compares it against a direct uproot read.

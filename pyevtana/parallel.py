@@ -81,7 +81,8 @@ class Chunk:
 
             reader = FileReader(self.partition.path, self.dataset.tree_path,
                                 Selector(self.dataset.branches), self.dataset.on_missing,
-                                self.dataset.io_kwargs)
+                                self.dataset.io_kwargs,
+                                getattr(self.dataset, "handler", "auto"))
             reader.open()
             if self.dataset.required:
                 reader.check_required(self.dataset.required)

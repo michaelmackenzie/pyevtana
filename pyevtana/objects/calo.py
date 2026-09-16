@@ -8,7 +8,7 @@ follow a link, and it needs the target branch to have been read.
 
 from __future__ import annotations
 
-from ..collection import ObjectCollection
+from ..collection import ObjectCollection, event_collection
 from ..missing import MissingRecord, is_missing
 from ..record import RecordProxy
 
@@ -21,30 +21,32 @@ class _Linked(RecordProxy):
     def _follow_many(self, field: str, target: str, cls: type):
         """``field`` holds indices into ``target``."""
         coll = self._coll
-        arr = coll._sibling(target)
-        if is_missing(arr):
-            return arr
+        cols = coll._sibling(target)
+        if is_missing(cols):
+            return cols
         try:
-            indices = self._rec[field]
-        except Exception:
+            indices = [int(i) for i in coll._column(field)[self._i]]
+        except KeyError:
             from ..missing import MissingCollection
 
             return MissingCollection(target, hint=f"this ntuple has no {field!r} field")
-        return ObjectCollection(arr[indices], cls, target, coll._batch, coll._ievt)
+        return ObjectCollection(cols, (coll._ievt,), len(indices), cls, target,
+                                coll._batch, coll._ievt, indices=indices)
 
     def _follow_one(self, field: str, target: str, cls: type):
         """``field`` holds a single index, ``-1`` meaning 'not associated'."""
         coll = self._coll
         try:
-            index = int(self._rec[field])
-        except Exception:
+            index = int(coll._column(field)[self._i])
+        except KeyError:
             return MissingRecord(target, hint=f"this ntuple has no {field!r} field")
         if index < 0:
             return MissingRecord(target, hint=f"{field} < 0: not associated")
-        arr = coll._sibling(target)
-        if is_missing(arr):
-            return MissingRecord(arr.name, arr.state, arr.reason)
-        return cls(arr[index], ObjectCollection(arr, cls, target, coll._batch, coll._ievt), index)
+        cols = coll._sibling(target)
+        if is_missing(cols):
+            return MissingRecord(cols.name, cols.state, cols.reason)
+        parent = event_collection(cols, coll._ievt, cls, target, coll._batch)
+        return cls(parent, index)
 
 
 class CaloRecoDigi(_Linked):

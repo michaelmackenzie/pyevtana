@@ -41,6 +41,7 @@ class CollectionInfo:
     kind: str                      # accessor family: track, calocluster, crvcoinc, ...
     leaves: list[str] = field(default_factory=list)    # readable sub-leaves ([] = unsplit)
     selected: list[str] = field(default_factory=list)  # subset the filter kept
+    nbytes: int = 0                # compressed size, so the cost of touching it is visible
     tag: str = ""                  # owning track tag, for track companions
     role: str = ""                 # companion role: info, hits, segs, mc, ...
 
@@ -128,6 +129,14 @@ class NtupleSchema:
 # --------------------------------------------------------------------------------------
 
 
+def _compressed_bytes(branch) -> int:
+    """Compressed size of a branch and its sub-branches, recursively."""
+    try:
+        return branch.compressed_bytes + sum(_compressed_bytes(c) for c in branch.branches)
+    except Exception:
+        return 0
+
+
 def _leaves_of(branch) -> list[str]:
     try:
         return list(branch.keys())
@@ -161,7 +170,7 @@ def discover(tree, selector: Optional[Selector] = None, source: str = "") -> Ntu
         depth, struct = parsed if parsed else (0, typename)
         info = CollectionInfo(
             name=canon, branch=branch_name, struct=struct, depth=depth, kind=kind,
-            leaves=_leaves_of(branch), tag=tag, role=role,
+            leaves=_leaves_of(branch), tag=tag, role=role, nbytes=_compressed_bytes(branch),
         )
         _apply_filter(info, selector)
         result.collections[canon] = info

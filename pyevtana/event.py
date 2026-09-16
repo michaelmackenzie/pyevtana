@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Optional
 
 from . import schema as S
-from .collection import ObjectCollection
+from .collection import ObjectCollection, event_collection
 from .missing import (AmbiguousCollection, BranchState, MissingRecord, is_missing,
                       missing_record, resolve_missing)
 from .objects import (CaloCluster, CaloDigi, CaloHit, CaloRecoDigi, CrvCoinc, CrvDigi,
@@ -53,10 +53,12 @@ class Event:
     # -- event-level singletons ---------------------------------------------------------------
 
     def _singleton(self, name: str, cls: type = EventRecord):
-        arr = self._batch.event_array(name, self._i)
-        if is_missing(arr):
-            return missing_record(arr.name, arr.state, arr.reason)
-        return cls(arr, None, self._i)
+        cols = self._batch.columns(name)
+        if is_missing(cols):
+            return missing_record(cols.name, cols.state, cols.reason)
+        # a depth-0 branch is one record per event, so the event index selects it
+        coll = event_collection(cols, self._i, cls, name, self._batch, depth=0)
+        return cls(coll, self._i)
 
     @property
     def info(self) -> EventRecord:
@@ -121,10 +123,10 @@ class Event:
     # -- collections ---------------------------------------------------------------------------
 
     def _collection(self, name: str, cls: type, tag: str = "", hint: str = ""):
-        arr = self._batch.event_array(name, self._i, hint=hint)
-        if is_missing(arr):
-            return arr
-        return ObjectCollection(arr, cls, name, self._batch, self._i, tag or name)
+        cols = self._batch.columns(name, hint=hint)
+        if is_missing(cols):
+            return cols
+        return event_collection(cols, self._i, cls, name, self._batch, tag)
 
     def _resolve(self, kind: str, tag: Optional[str], what: str) -> str:
         schema = self._batch.reader.schema
