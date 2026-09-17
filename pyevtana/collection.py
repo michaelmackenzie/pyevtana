@@ -143,10 +143,26 @@ class ObjectCollection:
 
 def event_collection(cols, ievt: int, cls: type, name: str, batch, tag: str = "",
                      depth: int = 1) -> ObjectCollection:
-    """The objects of one event (depth 1), or one event's whole branch (depth 0)."""
+    """The objects of one event (depth 1), or one event's whole branch (depth 0).
+
+    Cached per (branch, event, proxy class) on the batch. Without this, every track that
+    reaches for a depth-1 companion -- ``track.qual()``, ``track.pid()``,
+    ``track.calohit()`` -- builds a fresh collection whose column cache starts empty, so
+    the per-field walk is repeated for each track in the event rather than done once.
+    """
+    key = (name, ievt, cls)
+    cache = getattr(batch, "_collections", None) if batch is not None else None
+    if cache is not None:
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
     length = cols.lengths(1)[ievt] if depth else len(cols.array)
     prefix = (ievt,) if depth else ()
-    return ObjectCollection(cols, prefix, length, cls, name, batch, ievt, tag or name)
+    collection = ObjectCollection(cols, prefix, length, cls, name, batch, ievt, tag or name)
+    if cache is not None:
+        cache[key] = collection
+    return collection
 
 
 def nested_collection(cols, ievt: int, iobj: int, cls: type, name: str, batch,

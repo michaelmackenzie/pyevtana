@@ -84,7 +84,8 @@ def resolve_files(files: Union[PathLike, Sequence[PathLike]]) -> list[str]:
 class Batch:
     """One entry window of one file, plus the branches read so far."""
 
-    __slots__ = ("reader", "start", "stop", "_cache", "_objects", "_leaves")
+    __slots__ = ("reader", "start", "stop", "_cache", "_objects", "_leaves",
+                 "_collections")
 
     def __init__(self, reader: "FileReader", start: int, stop: int):
         self.reader = reader
@@ -93,6 +94,8 @@ class Batch:
         self._cache: dict = {}
         self._objects: dict = {}
         self._leaves: dict = {}
+        #: event-level collections, reused across the objects of one event
+        self._collections: dict = {}
 
     def __len__(self) -> int:
         return self.stop - self.start
@@ -161,7 +164,13 @@ class Batch:
         return columns
 
     def leaf(self, name: str, index: int):
-        """A standalone scalar leaf (``trig_*``, ``tcnt.n*``), cached per window."""
+        """A standalone scalar leaf (``trig_*``, ``tcnt.n*``), cached per window.
+
+        Converted to a Python list on first use, for the same reason the collections are:
+        indexing an awkward array one element at a time costs tens of microseconds, and
+        these are read once per event -- a trigger decision per event was measured at
+        ~40% of the per-event cost before this.
+        """
         values = self._leaves.get(name)
         if values is None:
             try:
@@ -170,6 +179,7 @@ class Batch:
             except Exception:
                 raise MissingBranch(
                     f"leaf {name!r} is not present in {self.reader.source}") from None
+            values = ak.to_list(values)
             self._leaves[name] = values
         return values[index]
 
